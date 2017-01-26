@@ -60,6 +60,19 @@ module Filter =
         if Directory.Exists ctx.Payload.Source then None
         elif not <| File.Exists ctx.Payload.Source then None
         else ctx |> Some
+    
+    /// Allow configuration? 
+    let excludeDir (seg: string) =
+        if seg.StartsWith("_") then true
+        elif seg.StartsWith(".") then true
+        else false
+
+    let filterDirName (ctx: Context<Doc>) =
+        let dir = ctx.Payload.Source |> Path.GetFullPath |> Path.GetDirectoryName 
+        let dirs = dir.Split(Path.DirectorySeparatorChar)
+        match dirs |> Seq.tryFind excludeDir with
+        | None -> None
+        | _ -> ctx |> Some
 
 module Render =
 
