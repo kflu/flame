@@ -3,7 +3,6 @@
 open System
 open System.IO
 
-
 type Context<'a> = {
     SiteName : string
     SiteUrl : string
@@ -30,7 +29,7 @@ type ContentType =
     /// from file path
     | File of string 
     /// from a stream
-    | Stream of Stream 
+    | Stream of Stream
 
 type Doc = {
     /// from front matter
@@ -55,33 +54,22 @@ type Processor = Context<Doc list> -> Context<Doc list>
 /// Crawl docs
 type DocCrawler = Context<unit> -> Doc list
 
-module Filter =
-    let filter (ctx: Context<Doc>) =
-        if Directory.Exists ctx.Payload.Source then None
-        elif not <| File.Exists ctx.Payload.Source then None
-        else ctx |> Some
-    
-    /// Allow configuration? 
-    let excludeDir (seg: string) =
-        if seg.StartsWith("_") then true
-        elif seg.StartsWith(".") then true
-        else false
+module ops =
 
-    let filterDirName (ctx: Context<Doc>) =
-        let dir = ctx.Payload.Source |> Path.GetFullPath |> Path.GetDirectoryName 
-        let dirs = dir.Split(Path.DirectorySeparatorChar)
-        match dirs |> Seq.tryFind excludeDir with
-        | None -> None
-        | _ -> ctx |> Some
+    let splash (ctx: Context<Doc list>) : Context<Doc> list = ctx.Payload |> List.map (Context.Wrap ctx)
+    let collect ctx (docs: Context<Doc> list) = docs |> List.map (fun d -> d.Payload) |> Context.Wrap ctx
 
-module Render =
+    let (>=>) (f: 'a -> 'b option) (g: 'b -> 'c option) = 
+        fun a ->
+            match f a with
+            | None -> None
+            | Some b -> g b
 
-    let passthru : DocProcessor =
-        fun ctx -> 
-            let doc = { ctx.Payload with Content = File <| ctx.Payload.Source }
-            { ctx with Payload = doc } |> Some
+    let group (docp : DocProcessor) : Processor =
+        fun ctx ->
+            ctx |> splash |> List.choose (docp) |> collect ctx
 
-module Router = 
+module Common =
     open System.Web
 
     /// <summary>
@@ -121,6 +109,54 @@ module Router =
                             ensureDir <| Path.GetFullPath target
         _MakeRelativePath base_ target
 
+module Filter =
+    open ops
+        
+    let exclude (ex: Context<Doc> -> bool) (ctx: Context<Doc>) =
+        if ex ctx then None
+        else Some ctx
+    
+    let excludeDirectory ctx = Directory.Exists ctx.Payload.Source
+    let excludeAbsentFile ctx = File.Exists ctx.Payload.Source |> not
+    let excludeDirSegment (ex: string -> bool) ctx = 
+        let dir = ctx.Payload.Source |> Common.MakeRelativePath ctx.SourceRoot |> Path.GetDirectoryName
+        let dirs = dir.Split(Path.DirectorySeparatorChar)
+        match dirs |> Seq.tryFind ex with
+        | None -> false
+        | _ -> true
+    
+    let excludeRegex pattern (value:string) =
+        System.Text.RegularExpressions.Regex.IsMatch(value, pattern)
+
+    let filterDefault = 
+        exclude excludeDirectory
+        >=> exclude excludeAbsentFile
+        // >=> (excludeRegex @"\..*" |> excludeDirSegment |> exclude)
+        // >=> (excludeRegex @"_.*" |> excludeDirSegment |> exclude)
+
+    /// Allow configuration? 
+    let excludeDir (seg: string) =
+        if seg.StartsWith("_") then true
+        elif seg.StartsWith(".") then true
+        else false
+
+    let filterDirName (ctx: Context<Doc>) =
+        let dir = ctx.Payload.Source |> Path.GetFullPath |> Path.GetDirectoryName 
+        let dirs = dir.Split(Path.DirectorySeparatorChar)
+        match dirs |> Seq.tryFind excludeDir with
+        | None -> None
+        | _ -> ctx |> Some
+
+module Render =
+
+    let passthru : DocProcessor =
+        fun ctx -> 
+            let doc = { ctx.Payload with Content = File <| ctx.Payload.Source }
+            { ctx with Payload = doc } |> Some
+
+module Router = 
+    open Common
+
     let copy (ctx: Context<Doc>) =
         let relativeFilePath = MakeRelativePath ctx.SourceRoot ctx.Payload.Source
         { ctx with Payload = { ctx.Payload with Destination = Path.Combine(ctx.DropRoot, relativeFilePath) } } |> Some
@@ -141,26 +177,16 @@ module Crawler =
         |> List.ofArray
         |> Context.Wrap ctx
 
-module ops =
-
-    let splash (ctx: Context<Doc list>) : Context<Doc> list = ctx.Payload |> List.map (Context.Wrap ctx)
-    let merge ctx (docs: Context<Doc> list) = docs |> List.map (fun d -> d.Payload) |> Context.Wrap ctx
-
-    let (>>>) (f: 'a -> 'b option) (g: 'b -> 'c option) = 
-        fun a ->
-            match f a with
-            | None -> None
-            | Some b -> g b
-
-    let group (docp : DocProcessor) : Processor =
-        fun ctx ->
-            ctx |> splash |> List.choose (docp) |> merge ctx
-
-
 open ops
 
-let processDoc = Filter.filter >>> Router.copy >>> Render.passthru >>> Writer.display
-let final = Crawler.crawler >> group processDoc
+let processDoc = 
+    Filter.filterDefault 
+    >=> Router.copy 
+    >=> Render.passthru 
+    >=> Writer.display
+    |> group
+
+let final = Crawler.crawler >> processDoc
 
 let ctx = {
     SiteName = "foo bar"
