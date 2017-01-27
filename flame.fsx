@@ -1,7 +1,9 @@
 #load "html.fsx"
+#r "./packages/FSharpx.Extras/lib/net45/FSharpx.Extras.dll"
 
 open System
 open System.IO
+open FSharpx.String
 
 type Context<'a> = {
     SiteName : string
@@ -40,10 +42,16 @@ type Doc = {
     Source : string 
     /// where to write to
     Destination : string 
+
+    /// The main doc source ID for an asset group._AppDomain
+    /// "" or null means there's no MainDoc for current doc
+    MainDoc : string
 }
 with
     static member FromPath (fn: string) =
-        { Metadata = None; Content = NoContent; Source = fn; Destination = "" }
+        { Metadata = None; Content = NoContent; Source = fn; Destination = ""; MainDoc = "" }
+    
+    static member FromPathWithMain fn mainDoc = { Doc.FromPath fn with MainDoc = mainDoc }
 
 /// Process a doc and optionally exclude the doc from been generated
 type DocProcessor = Context<Doc> -> Context<Doc> option
@@ -170,12 +178,23 @@ module Writer =
         ctx |> Some
 
 module Crawler =
+    /// crawl with asset group feature
+    let rec _crawl (ctx: Context<unit>) (dir: string) (mainDoc : string) : Context<Doc> seq =
+        seq {
+            printfn "DEBUG: crawl directory: %A" dir
+            let files = Directory.GetFiles(dir, "*")
+            let index = files |> Array.tryFind (fun fn -> Path.GetFileNameWithoutExtension(fn) |> toLower = "index") 
+            let mainDoc = 
+                if Option.isSome index && mainDoc |> String.IsNullOrEmpty 
+                then index.Value
+                else mainDoc
+            yield! files |> Seq.map (fun fn -> Doc.FromPathWithMain fn mainDoc |> Context.Wrap ctx)
 
-    let crawler (ctx: Context<unit>) =
-        Directory.GetFiles(ctx.SourceRoot, "*", SearchOption.AllDirectories)
-        |> Array.map Doc.FromPath
-        |> List.ofArray
-        |> Context.Wrap ctx
+            yield! Directory.GetDirectories dir
+                   |> Seq.collect (fun dir -> _crawl ctx dir mainDoc)
+        }
+
+    let crawl ctx = _crawl ctx ctx.SourceRoot "" |> List.ofSeq |> ops.collect ctx
 
 open ops
 
@@ -186,13 +205,13 @@ let processDoc =
     >=> Writer.display
     |> group
 
-let final = Crawler.crawler >> processDoc
+let final = Crawler.crawl >> processDoc
 
 let ctx = {
     SiteName = "foo bar"
     SiteUrl = "http://foobar.com"
     Payload = ()
-    SourceRoot = @"C:\Users\user\works\blog\source\_posts"
+    SourceRoot = @"C:\Users\user\work\blog\source\_posts"
     DropRoot = @"c:\"
 }
 
