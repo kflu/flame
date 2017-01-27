@@ -76,6 +76,11 @@ module ops =
     let group (docp : DocProcessor) : Processor =
         fun ctx ->
             ctx |> splash |> List.choose (docp) |> collect ctx
+    
+    let group2 (f: Context<unit> -> Context<Doc> option list) : Context<unit> -> Context<Doc list> =
+        fun ctx ->
+            let docs = f ctx
+            docs |> List.choose id |> collect ctx
 
 module Common =
     open System.Web
@@ -168,6 +173,10 @@ module Router =
     let copy (ctx: Context<Doc>) =
         let relativeFilePath = MakeRelativePath ctx.SourceRoot ctx.Payload.Source
         { ctx with Payload = { ctx.Payload with Destination = Path.Combine(ctx.DropRoot, relativeFilePath) } } |> Some
+    
+    let routeWithMainDoc (ctx : Context<Doc>) =
+        let relativeToMain = MakeRelativePath ctx.Payload.MainDoc ctx.Payload.Source
+        let mainDir = Path.GetDirectoryName ctx.Payload.MainDoc
 
 /// writes doc onto disk
 module Writer =
@@ -194,7 +203,25 @@ module Crawler =
                    |> Seq.collect (fun dir -> _crawl ctx dir mainDoc)
         }
 
+    let rec _crawl2 (dir: string) (mainDoc: string) (docProc : DocProcessor) (ctx: Context<unit>) : Context<Doc> option seq =
+        seq {
+            printfn "DEBUG: crawl directory: %A" dir
+            let files = Directory.GetFiles(dir, "*")
+            let index = files |> Array.tryFind (fun fn -> Path.GetFileNameWithoutExtension(fn) |> toLower = "index")
+            let mainDoc = 
+                if Option.isSome index && mainDoc |> String.IsNullOrEmpty 
+                then index.Value
+                else mainDoc
+            yield! files |> Seq.map (fun fn -> Doc.FromPathWithMain fn mainDoc |> Context.Wrap ctx |> docProc )
+
+            yield! Directory.GetDirectories dir
+                   |> Seq.collect (fun dir -> _crawl2 dir mainDoc docProc ctx)
+        }
+
     let crawl ctx = _crawl ctx ctx.SourceRoot "" |> List.ofSeq |> ops.collect ctx
+    
+    let crawl2 docProc ctx = 
+        _crawl2 ctx.SourceRoot "" docProc ctx |> Seq.choose id |> List.ofSeq
 
 open ops
 
